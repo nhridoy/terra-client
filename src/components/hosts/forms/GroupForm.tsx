@@ -125,15 +125,28 @@ export default function GroupForm({
     fetchSnippets(currentVault);
   }, [fetchKeys, fetchSnippets, currentVault]);
 
+  // Editing must not save until the stored values are in the form, or the
+  // blank defaults would overwrite them.
   const groupId = group?.id;
+  const [load, setLoad] = useState<"loading" | "ready" | "failed">(
+    groupId ? "loading" : "ready",
+  );
   useEffect(() => {
     if (!groupId) return;
     let cancelled = false;
+    setLoad("loading");
     void useHostStore
       .getState()
       .getDecryptedGroup(groupId)
       .then((g) => {
-        if (g && !cancelled) reset(valuesFromGroup(g));
+        if (cancelled) return;
+        if (!g) return setLoad("failed");
+        // Keep a name the user already typed while this was loading.
+        reset(valuesFromGroup(g), { keepDirtyValues: true });
+        setLoad("ready");
+      })
+      .catch(() => {
+        if (!cancelled) setLoad("failed");
       });
     return () => {
       cancelled = true;
@@ -155,8 +168,10 @@ export default function GroupForm({
   const handleGroupSubmit = async (data: GroupFormValues) => {
     const parentId = group?.parentId || defaultParentId || undefined;
     if (group) {
+      if (load === "loading") return;
       await updateGroup(group.id, {
-        ...payloadFromForm(data, null),
+        // Unreadable stored values: send no credential/option keys so they're kept.
+        ...(load === "ready" && payloadFromForm(data, null)),
         name: data.name,
         parentId,
       });
@@ -182,7 +197,7 @@ export default function GroupForm({
     <ModalForm
       onClose={onClose}
       title={group ? "Edit Group" : "New Group"}
-      isPending={isPending}
+      isPending={isPending || load === "loading"}
       onSubmit={handleSubmit(onSubmit, onInvalid)}
       cancelButtonText="Cancel"
       submitButtonText={getButtonText()}
@@ -194,6 +209,13 @@ export default function GroupForm({
         placeholder="Group name"
         required
       />
+
+      {load === "failed" && (
+        <p role="alert" className="text-xs text-red-400">
+          Couldn't load this group's saved credentials and options. You can
+          still rename it; they will be left unchanged.
+        </p>
+      )}
 
       <Button
         type="button"

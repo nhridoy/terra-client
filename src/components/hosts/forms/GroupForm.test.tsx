@@ -61,10 +61,16 @@ const submit = async () => {
   });
 };
 
-async function mount(group?: { id: string; name: string }, decrypted = {}) {
+async function mount(
+  group?: { id: string; name: string },
+  decrypted = {},
+  load?: () => Promise<unknown>,
+) {
   const createGroup = vi.fn();
   const updateGroup = vi.fn();
-  const getDecryptedGroup = vi.fn(async () => ({ ...group, ...decrypted }));
+  const getDecryptedGroup = vi.fn(
+    load ?? (async () => ({ ...group, ...decrypted })),
+  );
   useHostStore.setState({
     createGroup,
     updateGroup,
@@ -200,5 +206,54 @@ describe("GroupForm", () => {
       "g1",
       expect.objectContaining({ authType: null, password: null, keyId: null }),
     );
+  });
+
+  describe("while the stored values are unavailable", () => {
+    const group = { id: "g1", name: "Prod" };
+    const nameOnly = (updateGroup: ReturnType<typeof vi.fn>) => {
+      expect(updateGroup).toHaveBeenCalledTimes(1);
+      const patch = updateGroup.mock.calls[0][1];
+      expect(Object.keys(patch).sort()).toEqual(["name", "parentId"]);
+      expect(patch.name).toBe("Prod");
+    };
+
+    it("does not save before the stored values load, then keeps typed name", async () => {
+      let resolve: (v: unknown) => void = () => {};
+      const { updateGroup } = await mount(
+        group,
+        {},
+        () => new Promise((r) => (resolve = r)),
+      );
+      changeInput(document.querySelector('input[id$="name"]'), "Renamed");
+      await submit();
+      expect(updateGroup).not.toHaveBeenCalled();
+      await act(async () => {
+        resolve({ ...group, username: "deploy" });
+      });
+      expect(
+        (document.querySelector('input[id$="name"]') as HTMLInputElement).value,
+      ).toBe("Renamed");
+      await submit();
+      expect(updateGroup).toHaveBeenCalledWith(
+        "g1",
+        expect.objectContaining({ name: "Renamed", username: "deploy" }),
+      );
+    });
+
+    it("saves only the name when the group can't be read", async () => {
+      const { updateGroup } = await mount(group, {}, async () => null);
+      expect(document.body.textContent).toContain("Couldn't load");
+      await submit();
+      nameOnly(updateGroup);
+    });
+
+    it("shows an error and saves only the name when loading fails", async () => {
+      const { updateGroup } = await mount(group, {}, async () => {
+        throw new Error("boom");
+      });
+      expect(document.body.textContent).toContain("Couldn't load");
+      await submit();
+      nameOnly(updateGroup);
+    });
   });
 });
