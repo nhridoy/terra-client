@@ -22,7 +22,7 @@ import {
   AGENT_FORWARD_HELP,
   recordAgentForwarding,
 } from "@/lib/terminal/agentForwarding";
-import { useHostStore } from "@/stores/hosts/hostStore";
+import { type Startup, useHostStore } from "@/stores/hosts/hostStore";
 import { useKeyStore } from "@/stores/keys/keyStore";
 import { useSnippetStore } from "@/stores/snippets/snippetStore";
 import { useVaultStore } from "@/stores/vault/vaultStore";
@@ -41,9 +41,9 @@ export interface HostData {
   groupId?: string;
   tags?: string[];
   keepaliveSecs?: number | null;
-  forwardAgent?: boolean;
+  forwardAgent?: boolean | null;
   env?: { name: string; value: string }[];
-  startup?: { snippetId: string } | { command: string } | null;
+  startup?: Startup;
 }
 
 interface HostFormProps {
@@ -144,11 +144,12 @@ export default function HostForm({
         keepaliveSecs: host?.keepaliveSecs || undefined,
         forwardAgent: host?.forwardAgent === true,
         env: host?.env ?? [],
-        startupMode: !host?.startup
-          ? "none"
-          : "snippetId" in host.startup
-            ? "snippet"
-            : "command",
+        startupMode:
+          !host?.startup || "none" in host.startup
+            ? "none"
+            : "snippetId" in host.startup
+              ? "snippet"
+              : "command",
         startupSnippetId:
           host?.startup && "snippetId" in host.startup
             ? host.startup.snippetId
