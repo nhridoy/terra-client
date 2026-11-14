@@ -294,23 +294,22 @@ export default function HostForm({
       startup: startupFromForm(data),
     };
 
-    // Turning the toggle on here is this device's "Allow"; off forgets it so re-enabling asks again.
-    const effective = forwardAgent ?? inherited?.forwardAgent ?? false;
-    // An unchanged group means the inherited value is also what the host had before.
-    const wasEffective =
-      host?.forwardAgent ??
-      ((host?.groupId ?? null) === (data.groupId || null)
-        ? inherited?.forwardAgent
-        : undefined) ??
-      false;
-    const turnedOn = effective && !wasEffective;
+    // Allow is only ever recorded when the user turns "On" here; an inherited value is asked for at connect.
+    const turnedOn = forwardAgent === true && host?.forwardAgent !== true;
+    const inheritedLoaded = !!inherited || !data.groupId;
+    const turnedOff =
+      (forwardAgent === false && host?.forwardAgent !== false) ||
+      (forwardAgent === null &&
+        host?.forwardAgent === true &&
+        inheritedLoaded &&
+        !inherited?.forwardAgent);
     if (host) {
       if (!(await updateHost(host.id, hostData))) {
         toast.error(useHostStore.getState().error ?? "Couldn't save host");
         return;
       }
       if (turnedOn) await recordAgentForwarding(host.id, true);
-      else if (!effective) await recordAgentForwarding(host.id, null);
+      else if (turnedOff) await recordAgentForwarding(host.id, null);
     } else {
       const created = await createHost(hostData);
       if (created && turnedOn) await recordAgentForwarding(created.id, true);

@@ -50,7 +50,9 @@ const PROD: InheritedDefaults = {
   keyName: "deploy-key",
   env: [{ name: "LANG", value: "C.UTF-8", from: "prod" }],
 };
-beforeEach(() => fetchInherited.mockResolvedValue(EMPTY));
+beforeEach(() => {
+  fetchInherited.mockResolvedValue(EMPTY);
+});
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -180,7 +182,14 @@ describe("HostForm advanced validation", () => {
 describe("HostForm edit", () => {
   it("submits existing connection options unchanged", async () => {
     const updateHost = vi.fn();
-    useHostStore.setState({ updateHost, hosts: [], groups: [] } as never);
+    useHostStore.setState({
+      updateHost,
+      hosts: [],
+      groups: [
+        { id: "g1", name: "one" },
+        { id: "g2", name: "two" },
+      ],
+    } as never);
     useVaultStore.setState({ currentVaultId: "v1" });
     const container = document.createElement("div");
     document.body.append(container);
@@ -280,21 +289,57 @@ describe("HostForm agent forwarding consent", () => {
     expect(decisions()).toEqual({ other: true });
   });
 
-  it("From group with an inherited On allows it on this device", async () => {
-    setDecisions({});
+  it("From group with an inherited On never records Allow from the form", async () => {
+    setDecisions({ h1: false });
     fetchInherited.mockResolvedValue({ ...EMPTY, forwardAgent: true });
     await mountEdit(false, () => {}, "g1");
     setForwarding("From group");
     await submit();
+    expect(decisions()).toEqual({ h1: false });
+  });
+
+  it("a new host inheriting On records no decision", async () => {
+    setDecisions({});
+    fetchInherited.mockResolvedValue({ ...EMPTY, forwardAgent: true });
+    const createHost = await mountAndFill();
+    createHost.mockResolvedValue({ id: "new1" });
+    await submit();
+    expect(decisions()).toEqual({});
+  });
+
+  it("moving between groups that both inherit On keeps Don't allow", async () => {
+    setDecisions({ h1: false });
+    fetchInherited.mockResolvedValue({ ...EMPTY, forwardAgent: true });
+    await mountEdit(null, () => {}, "g1");
+    pick("groupId", "two");
+    await act(async () => {});
+    await submit();
+    expect(decisions()).toEqual({ h1: false });
+  });
+
+  it("an own On from an inheriting host records Allow", async () => {
+    setDecisions({ h1: false });
+    await mountEdit(null, () => {}, "g1");
+    setForwarding("On");
+    await submit();
     expect(decisions()).toEqual({ h1: true });
   });
 
-  it("From group with nothing inherited forgets the answer", async () => {
+  it("From group with nothing inherited forgets an own On's answer", async () => {
     setDecisions({ h1: true });
     await mountEdit(true, () => {}, "g1");
     setForwarding("From group");
     await submit();
     expect(decisions()).toEqual({});
+  });
+
+  it("leaves the decision alone when the inherited lookup failed", async () => {
+    setDecisions({ h1: true });
+    fetchInherited.mockRejectedValue(new Error("boom"));
+    await mountEdit(true, () => {}, "g1");
+    setForwarding("From group");
+    await submit();
+    expect(decisions()).toEqual({ h1: true });
   });
 
   it("saving an inheriting host untouched keeps the answer", async () => {
