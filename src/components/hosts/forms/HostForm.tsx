@@ -295,15 +295,22 @@ export default function HostForm({
     };
 
     // Turning the toggle on here is this device's "Allow"; off forgets it so re-enabling asks again.
-    // shortcut: uses the host's own value, not the inherited one (Task 5 switches to the effective value).
-    const turnedOn = forwardAgent === true && !host?.forwardAgent;
+    const effective = forwardAgent ?? inherited?.forwardAgent ?? false;
+    // An unchanged group means the inherited value is also what the host had before.
+    const wasEffective =
+      host?.forwardAgent ??
+      ((host?.groupId ?? null) === (data.groupId || null)
+        ? inherited?.forwardAgent
+        : undefined) ??
+      false;
+    const turnedOn = effective && !wasEffective;
     if (host) {
       if (!(await updateHost(host.id, hostData))) {
         toast.error(useHostStore.getState().error ?? "Couldn't save host");
         return;
       }
       if (turnedOn) await recordAgentForwarding(host.id, true);
-      else if (!forwardAgent) await recordAgentForwarding(host.id, null);
+      else if (!effective) await recordAgentForwarding(host.id, null);
     } else {
       const created = await createHost(hostData);
       if (created && turnedOn) await recordAgentForwarding(created.id, true);

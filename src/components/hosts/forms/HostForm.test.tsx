@@ -221,11 +221,15 @@ describe("HostForm agent forwarding consent", () => {
     useSettingsStore.setState((s) => ({
       settings: { ...s.settings, agentForwardingDecisions: d },
     }));
-  const setForwarding = (label: "On" | "Off") => {
+  const setForwarding = (label: "From group" | "On" | "Off") => {
     click(byText("button", "Advanced"));
     pick("forwardAgentMode", label);
   };
-  async function mountEdit(forwardAgent: boolean, onClose = () => {}) {
+  async function mountEdit(
+    forwardAgent: boolean | null,
+    onClose = () => {},
+    groupId?: string,
+  ) {
     const updateHost = vi.fn(async () => true);
     useHostStore.setState({ updateHost, hosts: [], groups: [] } as never);
     const container = document.createElement("div");
@@ -240,6 +244,8 @@ describe("HostForm agent forwarding consent", () => {
       username: "u",
       password: "pw",
       authType: "password",
+      groupId,
+      vaultId: "v1",
       forwardAgent,
     };
     await act(async () => {
@@ -272,6 +278,31 @@ describe("HostForm agent forwarding consent", () => {
     setForwarding("Off");
     await submit();
     expect(decisions()).toEqual({ other: true });
+  });
+
+  it("From group with an inherited On allows it on this device", async () => {
+    setDecisions({});
+    fetchInherited.mockResolvedValue({ ...EMPTY, forwardAgent: true });
+    await mountEdit(false, () => {}, "g1");
+    setForwarding("From group");
+    await submit();
+    expect(decisions()).toEqual({ h1: true });
+  });
+
+  it("From group with nothing inherited forgets the answer", async () => {
+    setDecisions({ h1: true });
+    await mountEdit(true, () => {}, "g1");
+    setForwarding("From group");
+    await submit();
+    expect(decisions()).toEqual({});
+  });
+
+  it("saving an inheriting host untouched keeps the answer", async () => {
+    setDecisions({ h1: false });
+    fetchInherited.mockResolvedValue({ ...EMPTY, forwardAgent: true });
+    await mountEdit(null, () => {}, "g1");
+    await submit();
+    expect(decisions()).toEqual({ h1: false });
   });
 
   it("a failed save keeps the answer and the form open", async () => {

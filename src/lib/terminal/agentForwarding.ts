@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
+import { fetchInheritedDefaults } from "@/lib/hosts/inherited";
 import { useHostStore } from "@/stores/hosts/hostStore";
 import { useSettingsStore } from "@/stores/settings/settingsStore";
 
@@ -36,12 +37,28 @@ export async function recordAgentForwarding(
   );
 }
 
+/** The host's own On/Off wins; "From group" (null) takes the group chain's value. */
+export async function effectiveForwardAgent(host: {
+  forwardAgent?: boolean | null;
+  groupId?: string | null;
+  vaultId?: string;
+}): Promise<boolean> {
+  if (host.forwardAgent != null) return host.forwardAgent;
+  if (!host.groupId || !host.vaultId) return false;
+  try {
+    const d = await fetchInheritedDefaults(host.groupId, host.vaultId);
+    return d.forwardAgent ?? false;
+  } catch {
+    return false; // fail closed; Rust still gates the connect
+  }
+}
+
 // Panes opening together for one host share a single question.
 const asking = new Map<string, Promise<boolean>>();
 
 async function askAndRecord(hostId: string): Promise<boolean> {
   const host = await useHostStore.getState().getDecryptedHost(hostId);
-  if (!host?.forwardAgent) return false;
+  if (!host || !(await effectiveForwardAgent(host))) return false;
   const allowed = await new Promise<boolean>((resolve) =>
     useAgentForwardAsks.setState((s) => ({
       queue: [...s.queue, { host: host.name || host.address, resolve }],
