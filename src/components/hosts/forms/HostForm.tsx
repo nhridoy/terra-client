@@ -1,5 +1,5 @@
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useEffect, useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import { Controller, type FieldErrors, useForm } from "react-hook-form";
 import { toast } from "sonner";
 import ModalForm from "@/components/common/ModalForm";
@@ -7,9 +7,13 @@ import { Button } from "@/components/ui/Button";
 import { FormInput } from "@/components/ui/forms/FormInput";
 import { FormSelect } from "@/components/ui/forms/FormSelect";
 import {
+  fetchInheritedDefaults,
+  type InheritedDefaults,
+} from "@/lib/hosts/inherited";
+import {
   type HostFormValues,
   hostFormDefaultValues,
-  hostFormSchema,
+  hostFormSchemaFor,
 } from "@/lib/schema/hosts/hostFormSchema";
 import { parseTags } from "@/lib/snippets/parseTags";
 import { recordAgentForwarding } from "@/lib/terminal/agentForwarding";
@@ -26,7 +30,7 @@ export interface HostData {
   address: string;
   port: number;
   username: string;
-  authType: "password" | "key" | "both" | "none";
+  authType: "inherit" | "password" | "key" | "both" | "none";
   password?: string;
   keyId?: string;
   jumpHostId?: string | null;
@@ -46,12 +50,15 @@ interface HostFormProps {
 }
 
 function startupFromForm(data: HostFormValues): HostData["startup"] {
+  if (data.startupMode === "inherit") return null;
   if (data.startupMode === "snippet" && data.startupSnippetId)
     return { snippetId: data.startupSnippetId };
   const command = data.startupCommand?.trim();
   if (data.startupMode === "command" && command) return { command };
-  return null;
+  return { none: true };
 }
+
+const FORWARD = { inherit: null, on: true, off: false } as const;
 
 export default function HostForm({
   host,
@@ -110,8 +117,26 @@ export default function HostForm({
     };
   }, [hosts, currentVaultId, host?.id]);
 
-  const { control, handleSubmit, watch, reset } = useForm<HostFormValues>({
-    resolver: zodResolver(hostFormSchema),
+  const [inherited, setInherited] = useState<InheritedDefaults>();
+  // Read by the resolver at validation time; a username from the group makes the field optional.
+  const usernameInherited = useRef(false);
+  const initialGroupId = host?.groupId || defaultGroupId || "";
+  const isNew = !host;
+  const {
+    control,
+    handleSubmit,
+    watch,
+    reset,
+    setValue,
+    trigger,
+    formState: { isSubmitted },
+  } = useForm<HostFormValues>({
+    resolver: (values, context, options) =>
+      zodResolver(hostFormSchemaFor(usernameInherited.current))(
+        values,
+        context,
+        options,
+      ),
     defaultValues: {
       name: host?.name || hostFormDefaultValues.name,
       address: host?.address || hostFormDefaultValues.address,
@@ -122,7 +147,7 @@ export default function HostForm({
       keyId: host?.keyId || hostFormDefaultValues.keyId,
       jumpHostId: host?.jumpHostId || "",
       color: host?.color || hostFormDefaultValues.color,
-      groupId: host?.groupId || defaultGroupId || hostFormDefaultValues.groupId,
+      groupId: initialGroupId,
       tags: host?.tags ? parseTags(host.tags) : hostFormDefaultValues.tags,
       keepaliveMode:
         host?.keepaliveSecs == null
@@ -131,14 +156,27 @@ export default function HostForm({
             ? "off"
             : "custom",
       keepaliveSecs: host?.keepaliveSecs || undefined,
-      forwardAgent: host?.forwardAgent === true,
+      forwardAgentMode: host
+        ? host.forwardAgent == null
+          ? "inherit"
+          : host.forwardAgent
+            ? "on"
+            : "off"
+        : initialGroupId
+          ? "inherit"
+          : "off",
       env: host?.env ?? [],
-      startupMode:
-        !host?.startup || "none" in host.startup
-          ? "none"
-          : "snippetId" in host.startup
-            ? "snippet"
-            : "command",
+      startupMode: !host
+        ? initialGroupId
+          ? "inherit"
+          : "none"
+        : !host.startup
+          ? "inherit"
+          : "none" in host.startup
+            ? "none"
+            : "snippetId" in host.startup
+              ? "snippet"
+              : "command",
       startupSnippetId:
         host?.startup && "snippetId" in host.startup
           ? host.startup.snippetId
@@ -148,6 +186,47 @@ export default function HostForm({
     },
   });
   const selectedJumpHostId = watch("jumpHostId");
+  const groupId = watch("groupId") ?? "";
+
+  // Fields the user picked themselves; group changes never overwrite them.
+  const userSet = useRef(new Set<string>());
+  useEffect(() => {
+    const sub = watch((_, { name, type }) => {
+      if (type === "change" && name) userSet.current.add(name);
+    });
+    return () => sub.unsubscribe();
+  }, [watch]);
+
+  useEffect(() => {
+    let stale = false;
+    const apply = (d: InheritedDefaults | undefined) => {
+      if (stale) return;
+      setInherited(d);
+      if (!isNew) return;
+      const defaults = {
+        authType: d?.authType ? "inherit" : "password",
+        startupMode: groupId ? "inherit" : "none",
+        forwardAgentMode: groupId ? "inherit" : "off",
+      } as const;
+      for (const [name, value] of Object.entries(defaults))
+        if (!userSet.current.has(name))
+          setValue(name as keyof typeof defaults, value);
+    };
+    if (groupId && currentVaultId)
+      fetchInheritedDefaults(groupId, currentVaultId).then(apply, () =>
+        apply(undefined),
+      );
+    else apply(undefined);
+    return () => {
+      stale = true;
+    };
+  }, [groupId, currentVaultId, isNew, setValue]);
+
+  useEffect(() => {
+    usernameInherited.current = !!inherited?.username;
+    if (isSubmitted) void trigger("username");
+  }, [inherited, isSubmitted, trigger]);
+
   const missingBastion =
     !!selectedJumpHostId &&
     !bastions.some((item) => item.id === selectedJumpHostId);
@@ -179,6 +258,7 @@ export default function HostForm({
       return;
     }
     setRouteError(null);
+    const forwardAgent = FORWARD[data.forwardAgentMode];
     const hostData = {
       name: data.name,
       address: data.address,
@@ -209,20 +289,21 @@ export default function HostForm({
           : data.keepaliveMode === "custom"
             ? Number(data.keepaliveSecs)
             : null,
-      forwardAgent: data.forwardAgent,
+      forwardAgent,
       env: data.env.filter((row) => row.name !== ""),
       startup: startupFromForm(data),
     };
 
     // Turning the toggle on here is this device's "Allow"; off forgets it so re-enabling asks again.
-    const turnedOn = data.forwardAgent && !host?.forwardAgent;
+    // shortcut: uses the host's own value, not the inherited one (Task 5 switches to the effective value).
+    const turnedOn = forwardAgent === true && !host?.forwardAgent;
     if (host) {
       if (!(await updateHost(host.id, hostData))) {
         toast.error(useHostStore.getState().error ?? "Couldn't save host");
         return;
       }
       if (turnedOn) await recordAgentForwarding(host.id, true);
-      else if (!data.forwardAgent) await recordAgentForwarding(host.id, null);
+      else if (!forwardAgent) await recordAgentForwarding(host.id, null);
     } else {
       const created = await createHost(hostData);
       if (created && turnedOn) await recordAgentForwarding(created.id, true);
@@ -284,11 +365,15 @@ export default function HostForm({
         name="username"
         label="Username"
         control={control}
-        placeholder="root"
-        required
+        placeholder={
+          inherited?.username
+            ? `From group '${inherited.usernameFrom}': ${inherited.username}`
+            : "root"
+        }
+        required={!inherited?.username}
       />
 
-      <CredentialsFields control={control} mode="host" />
+      <CredentialsFields control={control} mode="host" inherited={inherited} />
 
       <FormSelect
         name="jumpHostId"
@@ -366,7 +451,11 @@ export default function HostForm({
         {showAdvanced ? "Hide advanced" : "Advanced"}
       </Button>
       {showAdvanced && (
-        <ConnectionOptionsFields control={control} mode="host" />
+        <ConnectionOptionsFields
+          control={control}
+          mode="host"
+          inherited={inherited}
+        />
       )}
     </ModalForm>
   );

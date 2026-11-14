@@ -1,8 +1,20 @@
 // @vitest-environment happy-dom
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 
+const { fetchInherited } = vi.hoisted(() => ({ fetchInherited: vi.fn() }));
+vi.mock("@/lib/hosts/inherited", () => ({
+  fetchInheritedDefaults: fetchInherited,
+}));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(async () => {}) }));
 vi.mock("@tauri-apps/plugin-store", () => ({
   load: async () => ({
@@ -17,11 +29,28 @@ vi.mock("@/stores/auth/authStore", () => ({
   useAuthStore: { getState: () => ({ user: { id: "u1" } }) },
 }));
 
+import type { InheritedDefaults } from "@/lib/hosts/inherited";
 import { useHostStore } from "@/stores/hosts/hostStore";
 import { useSettingsStore } from "@/stores/settings/settingsStore";
 import { useSnippetStore } from "@/stores/snippets/snippetStore";
 import { useVaultStore } from "@/stores/vault/vaultStore";
 import HostForm from "./HostForm";
+
+const EMPTY: InheritedDefaults = {
+  hasPassword: false,
+  startupKind: null,
+  env: [],
+};
+const PROD: InheritedDefaults = {
+  ...EMPTY,
+  username: "deploy",
+  usernameFrom: "prod",
+  authType: "key",
+  authFrom: "prod",
+  keyName: "deploy-key",
+  env: [{ name: "LANG", value: "C.UTF-8", from: "prod" }],
+};
+beforeEach(() => fetchInherited.mockResolvedValue(EMPTY));
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -45,6 +74,18 @@ const byText = (sel: string, text: string) =>
   [...document.querySelectorAll(sel)].find((e) =>
     e.textContent?.includes(text),
   );
+const pick = (id: string, label: string) => {
+  click(document.getElementById(id) ?? undefined);
+  act(() => {
+    [...document.querySelectorAll("[role=option]")]
+      .find((e) => e.textContent === label)
+      ?.dispatchEvent(
+        new MouseEvent("mousedown", { bubbles: true, cancelable: true }),
+      );
+  });
+};
+const input = (name: string) =>
+  document.querySelector(`input[name="${name}"]`) as HTMLInputElement | null;
 const changeInput = (el: HTMLInputElement, value: string) =>
   act(() => {
     const set = Object.getOwnPropertyDescriptor(
@@ -111,17 +152,16 @@ describe("HostForm advanced validation", () => {
     expect(createHost).not.toHaveBeenCalled();
   });
 
-  it("has an agent forwarding toggle in Advanced, off by default", async () => {
+  it("has an agent forwarding choice in Advanced, off by default", async () => {
     await mountAndFill();
     expect(document.body.textContent).not.toContain("Forward SSH agent");
     click(byText("button", "Advanced"));
     expect(document.body.textContent).toContain(
       "Lets this server use your local SSH keys while you're connected. Anyone with root on the server can use them too. Only enable for servers you trust.",
     );
-    const toggle = document.querySelector(
-      'input[aria-label="Forward SSH agent"]',
-    ) as HTMLInputElement;
-    expect(toggle.checked).toBe(false);
+    expect(document.getElementById("forwardAgentMode")?.textContent).toBe(
+      "Off",
+    );
   });
 
   it("renders nested env name errors", async () => {
@@ -181,12 +221,9 @@ describe("HostForm agent forwarding consent", () => {
     useSettingsStore.setState((s) => ({
       settings: { ...s.settings, agentForwardingDecisions: d },
     }));
-  const toggle = () => {
+  const setForwarding = (label: "On" | "Off") => {
     click(byText("button", "Advanced"));
-    click(
-      document.querySelector('input[aria-label="Forward SSH agent"]') ??
-        undefined,
-    );
+    pick("forwardAgentMode", label);
   };
   async function mountEdit(forwardAgent: boolean, onClose = () => {}) {
     const updateHost = vi.fn(async () => true);
@@ -215,7 +252,7 @@ describe("HostForm agent forwarding consent", () => {
     setDecisions({});
     const createHost = await mountAndFill();
     createHost.mockResolvedValue({ id: "new1" });
-    toggle();
+    setForwarding("On");
     await submit();
     expect(createHost.mock.calls[0][0].forwardAgent).toBe(true);
     expect(decisions()).toEqual({ new1: true });
@@ -224,7 +261,7 @@ describe("HostForm agent forwarding consent", () => {
   it("turning it on for an existing host allows it on this device", async () => {
     setDecisions({ h1: false });
     await mountEdit(false);
-    toggle();
+    setForwarding("On");
     await submit();
     expect(decisions()).toEqual({ h1: true });
   });
@@ -232,7 +269,7 @@ describe("HostForm agent forwarding consent", () => {
   it("turning it off forgets this device's answer", async () => {
     setDecisions({ h1: false, other: true });
     await mountEdit(true);
-    toggle();
+    setForwarding("Off");
     await submit();
     expect(decisions()).toEqual({ other: true });
   });
@@ -242,7 +279,7 @@ describe("HostForm agent forwarding consent", () => {
     const onClose = vi.fn();
     const updateHost = await mountEdit(false, onClose);
     updateHost.mockResolvedValue(false);
-    toggle();
+    setForwarding("On");
     await submit();
     expect(updateHost).toHaveBeenCalledTimes(1);
     expect(decisions()).toEqual({ h1: false });
@@ -263,5 +300,232 @@ describe("HostForm snippets", () => {
     useSnippetStore.setState({ fetchSnippets } as never);
     await mountAndFill();
     expect(fetchSnippets).toHaveBeenCalledWith("v1");
+  });
+});
+
+describe("HostForm inherits from its group", () => {
+  const GROUPS = [
+    { id: "g1", name: "prod" },
+    { id: "g2", name: "dev" },
+  ];
+  async function mount(opts: {
+    host?: Record<string, unknown>;
+    defaultGroupId?: string;
+    inherited?: InheritedDefaults;
+  }) {
+    const createHost = vi.fn(async (_h: Record<string, unknown>) => ({
+      id: "new1",
+    }));
+    const updateHost = vi.fn(
+      async (_id: string, _p: Record<string, unknown>) => true,
+    );
+    if (opts.inherited) fetchInherited.mockResolvedValue(opts.inherited);
+    useHostStore.setState({
+      createHost,
+      updateHost,
+      hosts: [],
+      groups: GROUPS,
+    } as never);
+    useVaultStore.setState({ currentVaultId: "v1" });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    roots.push(root);
+    await act(async () => {
+      root.render(
+        <HostForm
+          host={opts.host as never}
+          defaultGroupId={opts.defaultGroupId}
+          onClose={() => {}}
+        />,
+      );
+    });
+    if (!opts.host) {
+      changeInput(input("name") as HTMLInputElement, "n");
+      changeInput(input("address") as HTMLInputElement, "a");
+    }
+    return { createHost, updateHost };
+  }
+  const existing = (extra: Record<string, unknown>) => ({
+    id: "h1",
+    name: "n",
+    address: "a",
+    port: 22,
+    username: "u",
+    password: "pw",
+    authType: "password",
+    groupId: "g1",
+    ...extra,
+  });
+
+  it("shows the group's username as placeholder and allows it empty", async () => {
+    const { createHost } = await mount({
+      defaultGroupId: "g1",
+      inherited: PROD,
+    });
+    expect(fetchInherited).toHaveBeenCalledWith("g1", "v1");
+    expect(input("username")?.placeholder).toBe("From group 'prod': deploy");
+    await submit();
+    expect(createHost).toHaveBeenCalledTimes(1);
+    expect(createHost.mock.calls[0][0]).toMatchObject({ username: "" });
+  });
+
+  it("requires a username without a group", async () => {
+    const { createHost } = await mount({});
+    changeInput(input("password") as HTMLInputElement, "pw");
+    await submit();
+    expect(document.body.textContent).toContain("Username is required");
+    expect(createHost).not.toHaveBeenCalled();
+  });
+
+  it("requires a username when the chain has none", async () => {
+    const { createHost } = await mount({ defaultGroupId: "g1" });
+    changeInput(input("password") as HTMLInputElement, "pw");
+    await submit();
+    expect(document.body.textContent).toContain("Username is required");
+    expect(createHost).not.toHaveBeenCalled();
+  });
+
+  it("offers From group auth only when the host has a group", async () => {
+    await mount({});
+    expect(byText("button", "From group")).toBeUndefined();
+  });
+
+  it("choosing From group hides secrets and saves inherit", async () => {
+    const { updateHost } = await mount({
+      host: existing({}),
+      inherited: PROD,
+    });
+    // An existing password host keeps Password.
+    expect(input("password")).not.toBeNull();
+    click(byText("button", "From group"));
+    expect(input("password")).toBeNull();
+    expect(document.body.textContent).toContain(
+      "Using credentials from 'prod'",
+    );
+    expect(document.body.textContent).toContain("deploy-key");
+    expect(document.body.textContent).not.toContain("pw");
+    await submit();
+    expect(updateHost.mock.calls[0][1].authType).toBe("inherit");
+  });
+
+  it("a new host in a group whose chain sets auth defaults to From group", async () => {
+    const { createHost } = await mount({
+      defaultGroupId: "g1",
+      inherited: PROD,
+    });
+    expect(input("password")).toBeNull();
+    await submit();
+    expect(createHost.mock.calls[0][0].authType).toBe("inherit");
+  });
+
+  it("an inherit host without a group asks for credentials or a group", async () => {
+    const { updateHost } = await mount({
+      host: existing({ authType: "inherit", groupId: undefined }),
+    });
+    expect(byText("button", "From group")).toBeDefined();
+    await submit();
+    expect(updateHost).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("Pick credentials or a group");
+  });
+
+  it("startup: new host in a group defaults to From group, None saves the marker", async () => {
+    const first = await mount({ defaultGroupId: "g1", inherited: PROD });
+    await submit();
+    expect(first.createHost.mock.calls[0][0].startup).toBeNull();
+
+    for (const r of roots.splice(0)) act(() => r.unmount());
+    const second = await mount({ defaultGroupId: "g1", inherited: PROD });
+    click(byText("button", "Advanced"));
+    pick("startupMode", "None");
+    await submit();
+    expect(second.createHost.mock.calls[0][0].startup).toEqual({ none: true });
+  });
+
+  it("startup: an existing host with null startup in a group shows From group", async () => {
+    await mount({ host: existing({ startup: null }) });
+    click(byText("button", "Advanced"));
+    expect(document.getElementById("startupMode")?.textContent).toBe(
+      "From group",
+    );
+  });
+
+  it("forwarding: From group saves null, Off false, On true", async () => {
+    for (const [label, saved] of [
+      [null, null],
+      ["Off", false],
+      ["On", true],
+    ] as const) {
+      for (const r of roots.splice(0)) act(() => r.unmount());
+      const { createHost } = await mount({
+        defaultGroupId: "g1",
+        inherited: PROD,
+      });
+      click(byText("button", "Advanced"));
+      expect(document.getElementById("forwardAgentMode")?.textContent).toBe(
+        "From group",
+      );
+      if (label) pick("forwardAgentMode", label);
+      await submit();
+      expect(createHost.mock.calls[0][0].forwardAgent).toBe(saved);
+    }
+  });
+
+  it("shows inherited env vars read-only above the host's own rows", async () => {
+    await mount({
+      host: existing({ env: [{ name: "TZ", value: "UTC" }] }),
+      inherited: PROD,
+    });
+    click(byText("button", "Advanced"));
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("LANG=C.UTF-8");
+    expect(text).toContain("from prod");
+    expect(text.indexOf("LANG=C.UTF-8")).toBeLessThan(
+      text.indexOf("Add variable"),
+    );
+    expect(input("env.0.name")?.value).toBe("TZ");
+    expect(document.querySelector('input[value="LANG"]')).toBeNull();
+  });
+
+  it("marks an inherited env var overridden by the host", async () => {
+    await mount({
+      host: existing({ env: [{ name: "LANG", value: "en_US" }] }),
+      inherited: PROD,
+    });
+    click(byText("button", "Advanced"));
+    expect(document.body.textContent).toContain("overridden");
+  });
+
+  it("a group change keeps choices the user made on a new host", async () => {
+    await mount({});
+    click(byText("button", "Advanced"));
+    pick("forwardAgentMode", "On");
+    pick("groupId", "prod");
+    await act(async () => {});
+    expect(document.getElementById("forwardAgentMode")?.textContent).toBe("On");
+    expect(document.getElementById("startupMode")?.textContent).toBe(
+      "From group",
+    );
+  });
+
+  it("refetches when the group changes and ignores stale answers", async () => {
+    let resolveFirst: (v: InheritedDefaults) => void = () => {};
+    fetchInherited.mockImplementationOnce(
+      () =>
+        new Promise((r) => {
+          resolveFirst = r;
+        }),
+    );
+    await mount({ host: existing({ username: "" }) });
+    fetchInherited.mockResolvedValue({
+      ...EMPTY,
+      username: "dev-user",
+      usernameFrom: "dev",
+    });
+    pick("groupId", "dev");
+    await act(async () => {});
+    expect(fetchInherited).toHaveBeenLastCalledWith("g2", "v1");
+    await act(async () => resolveFirst(PROD));
+    expect(input("username")?.placeholder).toBe("From group 'dev': dev-user");
   });
 });

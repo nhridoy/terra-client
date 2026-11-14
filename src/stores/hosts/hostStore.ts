@@ -28,7 +28,7 @@ export interface Host {
   createdAt: string;
   updatedAt: string;
   vaultId?: string;
-  authType?: "password" | "key" | "both" | "none";
+  authType?: "inherit" | "password" | "key" | "both" | "none";
   password?: string;
   privateKey?: string;
   passphrase?: string;
@@ -152,8 +152,7 @@ function hostFromRow(row: SyncRow): Host {
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
     vaultId: row.vault_id,
-    authType:
-      (row.auth_type as "password" | "key" | "both" | "none") ?? "password",
+    authType: (row.auth_type as Host["authType"]) ?? "password",
     password: undefined,
     keyId: row.key_id ?? undefined,
     data: row.data ?? "",
@@ -372,7 +371,7 @@ export const useHostStore = create<HostState>((set, get) => ({
             password: host.password,
             jumpHostId: host.jumpHostId ?? null,
             keepaliveSecs: host.keepaliveSecs ?? null,
-            forwardAgent: host.forwardAgent ?? false,
+            forwardAgent: host.forwardAgent ?? null,
             env: host.env ?? [],
             startup: host.startup ?? null,
           }),
@@ -593,8 +592,7 @@ export const useHostStore = create<HostState>((set, get) => ({
         return { password: "", privateKey: "", passphrase: "" };
       }
       data = row.data;
-      authType =
-        (row.auth_type as "password" | "key" | "both" | "none") ?? "password";
+      authType = (row.auth_type as Host["authType"]) ?? "password";
       keyId = row.key_id ?? undefined;
     }
     const payload = ((await decryptRowData(data)) ??

@@ -20,10 +20,14 @@ interface Props<T extends FieldValues> {
   inherited?: InheritedDefaults;
 }
 
-/** Keepalive, forwarding, env rows and startup. Group mode: "Not set" keepalive/forwarding. */
+/**
+ * Keepalive, forwarding, env rows and startup. Group mode: "Not set" keepalive/forwarding.
+ * Host mode: "From group" choices, and the group's env vars shown read-only.
+ */
 export default function ConnectionOptionsFields<T extends FieldValues>({
   control: typedControl,
   mode,
+  inherited,
 }: Props<T>) {
   // Shared by the host and group forms, whose value types differ.
   const control = typedControl as unknown as Control<FieldValues>;
@@ -36,6 +40,7 @@ export default function ConnectionOptionsFields<T extends FieldValues>({
   } = useFieldArray({ control, name: "env" });
   const keepaliveMode = useWatch({ control, name: "keepaliveMode" });
   const startupMode = useWatch({ control, name: "startupMode" });
+  const env: { name: string }[] = useWatch({ control, name: "env" }) ?? [];
 
   return (
     <div className="space-y-3">
@@ -46,7 +51,7 @@ export default function ConnectionOptionsFields<T extends FieldValues>({
         options={[
           {
             value: "default",
-            label: mode === "group" ? "Not set" : "Use default",
+            label: mode === "group" ? "Not set" : "From group / default",
           },
           { value: "off", label: "Off" },
           { value: "custom", label: "Custom" },
@@ -74,24 +79,15 @@ export default function ConnectionOptionsFields<T extends FieldValues>({
         />
       ) : (
         <div>
-          <Controller
-            name="forwardAgent"
+          <FormSelect
+            name="forwardAgentMode"
+            label="Forward SSH agent"
             control={control}
-            render={({ field }) => (
-              <label className="flex items-center gap-2 text-sm text-white">
-                <input
-                  type="checkbox"
-                  aria-label="Forward SSH agent"
-                  className="accent-primary-500"
-                  name={field.name}
-                  ref={field.ref}
-                  onBlur={field.onBlur}
-                  checked={!!field.value}
-                  onChange={(e) => field.onChange(e.target.checked)}
-                />
-                <span>Forward SSH agent</span>
-              </label>
-            )}
+            options={[
+              { value: "inherit", label: "From group" },
+              { value: "on", label: "On" },
+              { value: "off", label: "Off" },
+            ]}
           />
           <p className="text-xs text-dark-400">{AGENT_FORWARD_HELP}</p>
         </div>
@@ -101,6 +97,18 @@ export default function ConnectionOptionsFields<T extends FieldValues>({
         <legend className="block text-dark-300 text-sm mb-2">
           Environment variables
         </legend>
+        {inherited?.env.map((v) => {
+          const overridden = env.some((row) => row.name === v.name);
+          return (
+            <p key={v.name} className="text-xs text-dark-400">
+              <span className={overridden ? "line-through" : undefined}>
+                {v.name}={v.value}
+              </span>{" "}
+              from {v.from}
+              {overridden && " (overridden)"}
+            </p>
+          );
+        })}
         {envFields.map((field, i) => (
           <div key={field.id} className="grid grid-cols-[1fr_1fr_auto] gap-2">
             <FormInput
@@ -143,6 +151,9 @@ export default function ConnectionOptionsFields<T extends FieldValues>({
         label="On connect"
         control={control}
         options={[
+          ...(mode === "host"
+            ? [{ value: "inherit", label: "From group" }]
+            : []),
           { value: "none", label: "None" },
           { value: "snippet", label: "Snippet" },
           { value: "command", label: "Command" },

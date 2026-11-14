@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { hostFormDefaultValues, hostFormSchema } from "./hostFormSchema";
+import {
+  hostFormDefaultValues,
+  hostFormSchema,
+  hostFormSchemaFor,
+} from "./hostFormSchema";
 
 const base = {
   ...hostFormDefaultValues,
@@ -39,6 +43,38 @@ describe("hostFormSchema connection options", () => {
     );
     expect(
       issuePaths({ startupMode: "snippet", startupSnippetId: "s1" }),
+    ).toEqual([]);
+  });
+});
+
+describe("hostFormSchema group inheritance", () => {
+  it("accepts authType inherit with no password or key", () => {
+    expect(
+      issuePaths({
+        authType: "inherit",
+        password: "",
+        keyId: "",
+        groupId: "g1",
+      }),
+    ).toEqual([]);
+  });
+
+  it("inherit needs a group", () => {
+    expect(issuePaths({ authType: "inherit", groupId: "" })).toContain(
+      "authType",
+    );
+  });
+
+  it("username is required unless the group provides one", () => {
+    expect(issuePaths({ username: " " })).toContain("username");
+    expect(
+      hostFormSchemaFor(true).safeParse({ ...base, username: "" }).success,
+    ).toBe(true);
+  });
+
+  it("accepts the tri-state startup and forwarding modes", () => {
+    expect(
+      issuePaths({ startupMode: "inherit", forwardAgentMode: "inherit" }),
     ).toEqual([]);
   });
 });

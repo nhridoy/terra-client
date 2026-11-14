@@ -81,7 +81,7 @@ export default function HostsPage() {
                   name: editingHost.name,
                   address: editingHost.address,
                   port: editingHost.port,
-                  username: editingHost.username || "root",
+                  username: editingHost.username ?? "",
                   authType: editingHost.authType || "password",
                   password: editingHost.password,
                   keyId: editingHost.keyId || undefined,
