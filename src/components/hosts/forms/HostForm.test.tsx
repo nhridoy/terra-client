@@ -462,6 +462,23 @@ describe("HostForm inherits from its group", () => {
     expect(createHost).not.toHaveBeenCalled();
   });
 
+  it("choosing No Group saves groupId null so the row really leaves the group", async () => {
+    const { updateHost } = await mount({ host: existing({}), inherited: PROD });
+    pick("groupId", "No Group");
+    await submit();
+    expect(updateHost.mock.calls[0][1].groupId).toBeNull();
+  });
+
+  it("requires a username while the newly picked group's values are loading", async () => {
+    const { updateHost } = await mount({ host: existing({}), inherited: PROD });
+    changeInput(input("username") as HTMLInputElement, "");
+    fetchInherited.mockReturnValueOnce(new Promise(() => {}));
+    pick("groupId", "dev");
+    await submit();
+    expect(document.body.textContent).toContain("Username is required");
+    expect(updateHost).not.toHaveBeenCalled();
+  });
+
   it("offers From group auth only when the host has a group", async () => {
     await mount({});
     expect(byText("button", "From group")).toBeUndefined();

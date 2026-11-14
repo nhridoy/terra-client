@@ -199,6 +199,9 @@ export default function HostForm({
 
   useEffect(() => {
     let stale = false;
+    // Drop the previous group's values until the new ones arrive.
+    setInherited(undefined);
+    usernameInherited.current = false;
     const apply = (d: InheritedDefaults | undefined) => {
       if (stale) return;
       setInherited(d);
@@ -275,7 +278,7 @@ export default function HostForm({
           ? data.password
           : undefined,
       color: data.color,
-      groupId: data.groupId || undefined,
+      groupId: data.groupId || null,
       vaultId: currentVaultId || undefined,
       tags: data.tags
         ? data.tags
