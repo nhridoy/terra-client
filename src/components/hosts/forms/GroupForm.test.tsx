@@ -134,6 +134,17 @@ describe("GroupForm", () => {
     expect(document.body.textContent).not.toContain("From group");
   });
 
+  it("labels the null startup choice Not set", async () => {
+    await mount();
+    click(byText("button", "Advanced"));
+    click(document.getElementById("startupMode") ?? undefined);
+    const labels = [...document.querySelectorAll("[role=option]")].map(
+      (e) => e.textContent,
+    );
+    expect(labels).toContain("Not set");
+    expect(labels).not.toContain("None");
+  });
+
   it("requires a password for password auth", async () => {
     const { createGroup } = await mount();
     fillName("Prod");

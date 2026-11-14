@@ -154,7 +154,7 @@ export default function ConnectionOptionsFields<T extends FieldValues>({
           ...(mode === "host"
             ? [{ value: "inherit", label: "From group" }]
             : []),
-          { value: "none", label: "None" },
+          { value: "none", label: mode === "host" ? "None" : "Not set" },
           { value: "snippet", label: "Snippet" },
           { value: "command", label: "Command" },
         ]}
