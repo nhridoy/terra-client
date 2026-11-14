@@ -1,31 +1,24 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useEffect, useState, useTransition } from "react";
-import {
-  Controller,
-  type FieldErrors,
-  useFieldArray,
-  useForm,
-} from "react-hook-form";
+import { Controller, type FieldErrors, useForm } from "react-hook-form";
 import { toast } from "sonner";
 import ModalForm from "@/components/common/ModalForm";
 import { Button } from "@/components/ui/Button";
 import { FormInput } from "@/components/ui/forms/FormInput";
 import { FormSelect } from "@/components/ui/forms/FormSelect";
-import Textarea from "@/components/ui/Textarea";
 import {
   type HostFormValues,
   hostFormDefaultValues,
   hostFormSchema,
 } from "@/lib/schema/hosts/hostFormSchema";
 import { parseTags } from "@/lib/snippets/parseTags";
-import {
-  AGENT_FORWARD_HELP,
-  recordAgentForwarding,
-} from "@/lib/terminal/agentForwarding";
+import { recordAgentForwarding } from "@/lib/terminal/agentForwarding";
 import { type Startup, useHostStore } from "@/stores/hosts/hostStore";
 import { useKeyStore } from "@/stores/keys/keyStore";
 import { useSnippetStore } from "@/stores/snippets/snippetStore";
 import { useVaultStore } from "@/stores/vault/vaultStore";
+import ConnectionOptionsFields from "./ConnectionOptionsFields";
+import CredentialsFields from "./CredentialsFields";
 
 export interface HostData {
   id: string;
@@ -67,8 +60,6 @@ export default function HostForm({
 }: HostFormProps) {
   const { createHost, updateHost, groups, hosts } = useHostStore();
   const { currentVaultId } = useVaultStore();
-  const keys = useKeyStore((s) => s.keys);
-  const snippets = useSnippetStore((s) => s.snippets);
   const fetchSnippets = useSnippetStore((s) => s.fetchSnippets);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const fetchKeys = useKeyStore((s) => s.fetchKeys);
@@ -119,56 +110,43 @@ export default function HostForm({
     };
   }, [hosts, currentVaultId, host?.id]);
 
-  const { control, handleSubmit, watch, reset, register } =
-    useForm<HostFormValues>({
-      resolver: zodResolver(hostFormSchema),
-      defaultValues: {
-        name: host?.name || hostFormDefaultValues.name,
-        address: host?.address || hostFormDefaultValues.address,
-        port: host?.port || hostFormDefaultValues.port,
-        username: host?.username || hostFormDefaultValues.username,
-        authType: host?.authType || hostFormDefaultValues.authType,
-        password: host?.password ?? hostFormDefaultValues.password,
-        keyId: host?.keyId || hostFormDefaultValues.keyId,
-        jumpHostId: host?.jumpHostId || "",
-        color: host?.color || hostFormDefaultValues.color,
-        groupId:
-          host?.groupId || defaultGroupId || hostFormDefaultValues.groupId,
-        tags: host?.tags ? parseTags(host.tags) : hostFormDefaultValues.tags,
-        keepaliveMode:
-          host?.keepaliveSecs == null
-            ? "default"
-            : host.keepaliveSecs === 0
-              ? "off"
-              : "custom",
-        keepaliveSecs: host?.keepaliveSecs || undefined,
-        forwardAgent: host?.forwardAgent === true,
-        env: host?.env ?? [],
-        startupMode:
-          !host?.startup || "none" in host.startup
-            ? "none"
-            : "snippetId" in host.startup
-              ? "snippet"
-              : "command",
-        startupSnippetId:
-          host?.startup && "snippetId" in host.startup
-            ? host.startup.snippetId
-            : "",
-        startupCommand:
-          host?.startup && "command" in host.startup
-            ? host.startup.command
-            : "",
-      },
-    });
-  const {
-    fields: envFields,
-    append: appendEnv,
-    remove: removeEnv,
-  } = useFieldArray({ control, name: "env" });
-  const keepaliveMode = watch("keepaliveMode");
-  const startupMode = watch("startupMode");
-
-  const authType = watch("authType");
+  const { control, handleSubmit, watch, reset } = useForm<HostFormValues>({
+    resolver: zodResolver(hostFormSchema),
+    defaultValues: {
+      name: host?.name || hostFormDefaultValues.name,
+      address: host?.address || hostFormDefaultValues.address,
+      port: host?.port || hostFormDefaultValues.port,
+      username: host?.username || hostFormDefaultValues.username,
+      authType: host?.authType || hostFormDefaultValues.authType,
+      password: host?.password ?? hostFormDefaultValues.password,
+      keyId: host?.keyId || hostFormDefaultValues.keyId,
+      jumpHostId: host?.jumpHostId || "",
+      color: host?.color || hostFormDefaultValues.color,
+      groupId: host?.groupId || defaultGroupId || hostFormDefaultValues.groupId,
+      tags: host?.tags ? parseTags(host.tags) : hostFormDefaultValues.tags,
+      keepaliveMode:
+        host?.keepaliveSecs == null
+          ? "default"
+          : host.keepaliveSecs === 0
+            ? "off"
+            : "custom",
+      keepaliveSecs: host?.keepaliveSecs || undefined,
+      forwardAgent: host?.forwardAgent === true,
+      env: host?.env ?? [],
+      startupMode:
+        !host?.startup || "none" in host.startup
+          ? "none"
+          : "snippetId" in host.startup
+            ? "snippet"
+            : "command",
+      startupSnippetId:
+        host?.startup && "snippetId" in host.startup
+          ? host.startup.snippetId
+          : "",
+      startupCommand:
+        host?.startup && "command" in host.startup ? host.startup.command : "",
+    },
+  });
   const selectedJumpHostId = watch("jumpHostId");
   const missingBastion =
     !!selectedJumpHostId &&
@@ -310,60 +288,7 @@ export default function HostForm({
         required
       />
 
-      <fieldset>
-        <legend className="block text-dark-300 text-sm mb-2">
-          Authentication <span className="text-red-400 ml-0.5">*</span>
-        </legend>
-        <Controller
-          name="authType"
-          control={control}
-          render={({ field }) => (
-            <div className="grid grid-cols-4 gap-2">
-              {(["password", "key", "both", "none"] as const).map((type) => (
-                <Button
-                  key={type}
-                  type="button"
-                  onClick={() => field.onChange(type)}
-                  variant={field.value === type ? "default" : "secondary"}
-                  className="flex-1"
-                >
-                  {type === "password"
-                    ? "Password"
-                    : type === "key"
-                      ? "SSH Key"
-                      : type === "both"
-                        ? "Both"
-                        : "None"}
-                </Button>
-              ))}
-            </div>
-          )}
-        />
-      </fieldset>
-
-      {(authType === "password" || authType === "both") && (
-        <FormInput
-          name="password"
-          label="Password"
-          control={control}
-          type="password"
-          placeholder="Enter password"
-          required
-        />
-      )}
-
-      {(authType === "key" || authType === "both") && (
-        <FormSelect
-          name="keyId"
-          label="SSH Key"
-          control={control}
-          options={[
-            { value: "", label: "Select a key" },
-            ...keys.map((key) => ({ value: key.id, label: key.name })),
-          ]}
-          required
-        />
-      )}
+      <CredentialsFields control={control} mode="host" />
 
       <FormSelect
         name="jumpHostId"
@@ -441,122 +366,7 @@ export default function HostForm({
         {showAdvanced ? "Hide advanced" : "Advanced"}
       </Button>
       {showAdvanced && (
-        <div className="space-y-3">
-          <FormSelect
-            name="keepaliveMode"
-            label="Keepalive"
-            control={control}
-            options={[
-              { value: "default", label: "Use default" },
-              { value: "off", label: "Off" },
-              { value: "custom", label: "Custom" },
-            ]}
-          />
-          {keepaliveMode === "custom" && (
-            <FormInput
-              name="keepaliveSecs"
-              label="Keepalive interval (seconds, 5-600)"
-              control={control}
-              type="number"
-            />
-          )}
-
-          <div>
-            <label className="flex items-center gap-2 text-sm text-white">
-              <input
-                type="checkbox"
-                aria-label="Forward SSH agent"
-                className="accent-primary-500"
-                {...register("forwardAgent")}
-              />
-              <span>Forward SSH agent</span>
-            </label>
-            <p className="text-xs text-dark-400">{AGENT_FORWARD_HELP}</p>
-          </div>
-
-          <fieldset className="space-y-2">
-            <legend className="block text-dark-300 text-sm mb-2">
-              Environment variables
-            </legend>
-            {envFields.map((field, i) => (
-              <div
-                key={field.id}
-                className="grid grid-cols-[1fr_1fr_auto] gap-2"
-              >
-                <FormInput
-                  name={`env.${i}.name`}
-                  label="Name"
-                  control={control}
-                  placeholder="LANG"
-                />
-                <FormInput
-                  name={`env.${i}.value`}
-                  label="Value"
-                  control={control}
-                />
-                <Button
-                  type="button"
-                  variant="secondary"
-                  aria-label={`Remove variable ${i + 1}`}
-                  onClick={() => removeEnv(i)}
-                  className="self-end"
-                >
-                  Remove
-                </Button>
-              </div>
-            ))}
-            <Button
-              type="button"
-              variant="secondary"
-              onClick={() => appendEnv({ name: "", value: "" })}
-            >
-              Add variable
-            </Button>
-            <p className="text-xs text-dark-400">
-              Servers ignore variables they don't allow (`AcceptEnv` in
-              sshd_config); most allow only LANG and LC_*.
-            </p>
-          </fieldset>
-
-          <FormSelect
-            name="startupMode"
-            label="On connect"
-            control={control}
-            options={[
-              { value: "none", label: "None" },
-              { value: "snippet", label: "Snippet" },
-              { value: "command", label: "Command" },
-            ]}
-          />
-          {startupMode === "snippet" && (
-            <FormSelect
-              name="startupSnippetId"
-              label="Snippet"
-              control={control}
-              options={[
-                { value: "", label: "Select a snippet" },
-                ...snippets
-                  .filter((sn) => sn.vaultId === currentVaultId)
-                  .map((sn) => ({ value: sn.id, label: sn.name })),
-              ]}
-            />
-          )}
-          {startupMode === "command" && (
-            <Controller
-              name="startupCommand"
-              control={control}
-              render={({ field }) => (
-                <Textarea
-                  {...field}
-                  value={field.value ?? ""}
-                  aria-label="Startup command"
-                  rows={3}
-                  placeholder="cd /var/www && ls"
-                />
-              )}
-            />
-          )}
-        </div>
+        <ConnectionOptionsFields control={control} mode="host" />
       )}
     </ModalForm>
   );

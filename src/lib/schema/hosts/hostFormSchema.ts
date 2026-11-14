@@ -2,6 +2,15 @@ import { z } from "zod";
 
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
+export const envRowsSchema = z.array(
+  z.object({
+    name: z.string().refine((n) => n === "" || ENV_NAME.test(n), {
+      error: "Use letters, digits and underscores; no leading digit",
+    }),
+    value: z.string(),
+  }),
+);
+
 export const hostFormSchema = z
   .object({
     name: z
@@ -34,14 +43,7 @@ export const hostFormSchema = z
     keepaliveMode: z.enum(["default", "off", "custom"]),
     keepaliveSecs: z.coerce.number().optional(),
     forwardAgent: z.boolean(),
-    env: z.array(
-      z.object({
-        name: z.string().refine((n) => n === "" || ENV_NAME.test(n), {
-          error: "Use letters, digits and underscores; no leading digit",
-        }),
-        value: z.string(),
-      }),
-    ),
+    env: envRowsSchema,
     startupMode: z.enum(["none", "snippet", "command"]),
     startupSnippetId: z.string().optional(),
     startupCommand: z.string().optional(),
