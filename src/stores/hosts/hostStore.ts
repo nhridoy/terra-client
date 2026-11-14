@@ -7,6 +7,12 @@ import { deleteRow, getRow, listRows, upsertRow } from "@/lib/db/db";
 import { useKeyStore } from "@/stores/keys/keyStore";
 import { useVaultStore } from "@/stores/vault/vaultStore";
 
+export type Startup =
+  | { snippetId: string }
+  | { command: string }
+  | { none: true }
+  | null;
+
 export interface Host {
   id: string;
   name: string;
@@ -22,16 +28,16 @@ export interface Host {
   createdAt: string;
   updatedAt: string;
   vaultId?: string;
-  authType?: "password" | "key" | "both" | "none";
+  authType?: "inherit" | "password" | "key" | "both" | "none";
   password?: string;
   privateKey?: string;
   passphrase?: string;
   keyId?: string;
   jumpHostId?: string | null;
   keepaliveSecs?: number | null;
-  forwardAgent?: boolean;
+  forwardAgent?: boolean | null;
   env?: { name: string; value: string }[];
-  startup?: { snippetId: string } | { command: string } | null;
+  startup?: Startup;
   /** @internal encrypted payload blob — kept for on-demand decrypt, never render */
   data?: string;
 }
@@ -43,6 +49,15 @@ export interface Group {
   vaultId?: string;
   sortOrder: number;
   createdAt: string;
+  // Encrypted fields: only populated by getDecryptedGroup.
+  username?: string | null;
+  authType?: "password" | "key" | "both" | "none" | null;
+  password?: string | null;
+  keyId?: string | null;
+  keepaliveSecs?: number | null;
+  env?: { name: string; value: string }[];
+  startup?: Startup;
+  forwardAgent?: boolean | null;
 }
 
 interface HostState {
@@ -69,6 +84,7 @@ interface HostState {
   getCredentialsForHost: (
     hostId: string,
   ) => Promise<{ password: string; privateKey: string; passphrase: string }>;
+  getDecryptedGroup: (id: string) => Promise<Group | null>;
   createGroup: (group: Partial<Group>) => Promise<void>;
   updateGroup: (id: string, group: Partial<Group>) => Promise<void>;
   deleteGroup: (id: string) => Promise<void>;
@@ -82,10 +98,32 @@ interface HostPayload {
   password?: string;
   jumpHostId?: string | null;
   keepaliveSecs?: number | null;
-  forwardAgent?: boolean;
+  forwardAgent?: boolean | null;
   env?: { name: string; value: string }[];
-  startup?: { snippetId: string } | { command: string } | null;
+  startup?: Startup;
 }
+
+type GroupFields = Pick<
+  Group,
+  | "username"
+  | "authType"
+  | "password"
+  | "keyId"
+  | "keepaliveSecs"
+  | "env"
+  | "startup"
+  | "forwardAgent"
+>;
+const GROUP_KEYS: (keyof GroupFields)[] = [
+  "username",
+  "authType",
+  "password",
+  "keyId",
+  "keepaliveSecs",
+  "env",
+  "startup",
+  "forwardAgent",
+];
 
 function parseTags(tags: string | null | undefined): string[] {
   if (!tags) return [];
@@ -114,13 +152,35 @@ function hostFromRow(row: SyncRow): Host {
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
     vaultId: row.vault_id,
-    authType:
-      (row.auth_type as "password" | "key" | "both" | "none") ?? "password",
+    authType: (row.auth_type as Host["authType"]) ?? "password",
     password: undefined,
     keyId: row.key_id ?? undefined,
     data: row.data ?? "",
   };
 }
+
+function cleanStartup(v: unknown): Startup {
+  const s = v as Record<string, unknown> | null | undefined;
+  if (!s || typeof s !== "object") return null;
+  if (typeof s.snippetId === "string" && s.snippetId)
+    return { snippetId: s.snippetId };
+  if (typeof s.command === "string") return { command: s.command };
+  return s.none === true ? { none: true } : null;
+}
+
+const cleanKeepalive = (v: unknown): number | null =>
+  typeof v === "number" && Number.isFinite(v) ? v : null;
+
+const cleanForward = (v: unknown): boolean | null =>
+  typeof v === "boolean" ? v : null;
+
+const cleanEnv = (v: unknown): { name: string; value: string }[] =>
+  Array.isArray(v)
+    ? v.filter(
+        (e): e is { name: string; value: string } =>
+          typeof e?.name === "string" && typeof e?.value === "string",
+      )
+    : [];
 
 /** Map a decrypted payload onto Host fields, tolerating junk stored values. */
 function hostFieldsFromPayload(
@@ -138,32 +198,39 @@ function hostFieldsFromPayload(
   | "startup"
 > {
   const p = payload as Record<string, unknown>;
-  const startup = p.startup as Record<string, unknown> | null | undefined;
   return {
     address: payload.address ?? "",
     port: payload.port ?? 22,
     username: payload.username ?? "root",
     password: payload.password,
     jumpHostId: payload.jumpHostId ?? null,
-    keepaliveSecs:
-      typeof p.keepaliveSecs === "number" && Number.isFinite(p.keepaliveSecs)
-        ? p.keepaliveSecs
+    keepaliveSecs: cleanKeepalive(p.keepaliveSecs),
+    forwardAgent: cleanForward(p.forwardAgent),
+    env: cleanEnv(p.env),
+    startup: cleanStartup(p.startup),
+  };
+}
+
+const str = (v: unknown): string | null => (typeof v === "string" ? v : null);
+
+/** Map a decrypted group payload onto Group fields, tolerating junk. */
+function groupFieldsFromPayload(p: Record<string, unknown>): GroupFields {
+  const auth = p.authType;
+  return {
+    username: str(p.username),
+    authType:
+      auth === "password" ||
+      auth === "key" ||
+      auth === "both" ||
+      auth === "none"
+        ? auth
         : null,
-    forwardAgent: p.forwardAgent === true,
-    env: Array.isArray(p.env)
-      ? p.env.filter(
-          (e): e is { name: string; value: string } =>
-            typeof e?.name === "string" && typeof e?.value === "string",
-        )
-      : [],
-    startup:
-      startup && typeof startup === "object"
-        ? typeof startup.snippetId === "string" && startup.snippetId
-          ? { snippetId: startup.snippetId }
-          : typeof startup.command === "string"
-            ? { command: startup.command }
-            : null
-        : null,
+    password: str(p.password),
+    keyId: str(p.keyId),
+    keepaliveSecs: cleanKeepalive(p.keepaliveSecs),
+    env: cleanEnv(p.env),
+    startup: cleanStartup(p.startup),
+    forwardAgent: cleanForward(p.forwardAgent),
   };
 }
 
@@ -172,6 +239,13 @@ async function decryptHostRow(row: SyncRow): Promise<Host> {
   const payload = ((await decryptRowData(row.data)) ??
     {}) as Partial<HostPayload>;
   return { ...hostFromRow(row), ...hostFieldsFromPayload(payload) };
+}
+
+/** Encrypted group fields present in a patch (undefined = leave alone). */
+function definedFields(g: Partial<Group>): Partial<GroupFields> {
+  return Object.fromEntries(
+    GROUP_KEYS.filter((k) => g[k] !== undefined).map((k) => [k, g[k]]),
+  );
 }
 
 function newId(): string {
@@ -297,7 +371,7 @@ export const useHostStore = create<HostState>((set, get) => ({
             password: host.password,
             jumpHostId: host.jumpHostId ?? null,
             keepaliveSecs: host.keepaliveSecs ?? null,
-            forwardAgent: host.forwardAgent ?? false,
+            forwardAgent: host.forwardAgent ?? null,
             env: host.env ?? [],
             startup: host.startup ?? null,
           }),
@@ -446,6 +520,24 @@ export const useHostStore = create<HostState>((set, get) => ({
 
   selectHost: (host) => set({ selectedHost: host }),
 
+  getDecryptedGroup: async (id) => {
+    const row = await getRow("groups", id);
+    if (!row) return null;
+    const payload = ((await decryptRowData(row.data)) ?? {}) as Record<
+      string,
+      unknown
+    >;
+    return {
+      id: row.id,
+      name: row.name ?? "",
+      parentId: row.parent_id ?? null,
+      vaultId: row.vault_id,
+      sortOrder: row.sort_order,
+      createdAt: String(row.created_at),
+      ...groupFieldsFromPayload(payload),
+    };
+  },
+
   getDecryptedHost: async (hostId) => {
     const cached = get().hosts.find((h) => h.id === hostId);
     if (cached?.data) {
@@ -500,8 +592,7 @@ export const useHostStore = create<HostState>((set, get) => ({
         return { password: "", privateKey: "", passphrase: "" };
       }
       data = row.data;
-      authType =
-        (row.auth_type as "password" | "key" | "both" | "none") ?? "password";
+      authType = (row.auth_type as Host["authType"]) ?? "password";
       keyId = row.key_id ?? undefined;
     }
     const payload = ((await decryptRowData(data)) ??
@@ -538,7 +629,10 @@ export const useHostStore = create<HostState>((set, get) => ({
           parent_id: group.parentId ?? null,
           sort_order: group.sortOrder ?? 0,
         },
-        { plaintext: "{}", recordType: "groups" },
+        {
+          plaintext: JSON.stringify(definedFields(group)),
+          recordType: "groups",
+        },
       );
       const created: Group = {
         id: row.id,
@@ -562,7 +656,10 @@ export const useHostStore = create<HostState>((set, get) => ({
         set({ isLoading: false, error: "Group not found" });
         return;
       }
-      await decryptRowData(row.data);
+      const existing = ((await decryptRowData(row.data)) ?? {}) as Record<
+        string,
+        unknown
+      >;
       await upsertRow(
         "groups",
         {
@@ -575,10 +672,24 @@ export const useHostStore = create<HostState>((set, get) => ({
               : (row.parent_id ?? null),
           sort_order: patch.sortOrder ?? row.sort_order,
         },
-        { plaintext: "{}", recordType: "groups" },
+        {
+          plaintext: JSON.stringify({ ...existing, ...definedFields(patch) }),
+          recordType: "groups",
+        },
       );
+      // Keep secrets out of the list state; they live only in the encrypted row.
+      const { name, parentId, sortOrder } = patch;
       set({
-        groups: get().groups.map((g) => (g.id === id ? { ...g, ...patch } : g)),
+        groups: get().groups.map((g) =>
+          g.id === id
+            ? {
+                ...g,
+                ...(name !== undefined && { name }),
+                ...(parentId !== undefined && { parentId }),
+                ...(sortOrder !== undefined && { sortOrder }),
+              }
+            : g,
+        ),
         isLoading: false,
       });
     } catch (err) {

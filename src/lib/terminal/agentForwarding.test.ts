@@ -35,11 +35,13 @@ const args = {
   rows: 24,
 };
 
-function hostWith(forwardAgent: boolean) {
+function hostWith(forwardAgent: boolean | null) {
   const getDecryptedHost = vi.fn(async () => ({
     id: "h1",
     name: "prod",
     address: "10.0.0.1",
+    groupId: "g1",
+    vaultId: "v1",
     forwardAgent,
   }));
   useHostStore.setState({ getDecryptedHost } as never);
@@ -136,6 +138,58 @@ describe("connectSavedTerminal", () => {
       "connect_saved",
       expect.anything(),
     );
+  });
+});
+
+describe("inherited forwarding", () => {
+  const inheritFrom = (forwardAgent?: boolean) =>
+    mocks.invoke.mockImplementation((async (cmd: string) =>
+      cmd === "inherited_host_defaults"
+        ? { forwardAgent }
+        : undefined) as never);
+
+  it("asks for consent when the group turns forwarding on", async () => {
+    inheritFrom(true);
+    hostWith(null);
+    const pending = connectSavedTerminal(args);
+    await nextAsk();
+    answerAgentForwarding(true);
+    await pending;
+    expect(mocks.invoke).toHaveBeenCalledWith("inherited_host_defaults", {
+      groupId: "g1",
+      vaultId: "v1",
+    });
+    expect(mocks.invoke).toHaveBeenLastCalledWith("connect_saved", {
+      ...args,
+      allowAgentForwarding: true,
+    });
+  });
+
+  it("does not ask when the host turns it off under a group that allows it", async () => {
+    inheritFrom(true);
+    hostWith(false);
+    await connectSavedTerminal(args);
+    expect(asked()).toHaveLength(0);
+    expect(mocks.invoke).toHaveBeenLastCalledWith("connect_saved", {
+      ...args,
+      allowAgentForwarding: false,
+    });
+  });
+
+  it("does not ask when nothing in the chain turns it on", async () => {
+    inheritFrom(undefined);
+    hostWith(null);
+    await connectSavedTerminal(args);
+    expect(asked()).toHaveLength(0);
+  });
+
+  it("does not ask when the group lookup fails", async () => {
+    mocks.invoke.mockImplementation((async (cmd: string) => {
+      if (cmd === "inherited_host_defaults") throw new Error("boom");
+    }) as never);
+    hostWith(null);
+    await connectSavedTerminal(args);
+    expect(asked()).toHaveLength(0);
   });
 });
 

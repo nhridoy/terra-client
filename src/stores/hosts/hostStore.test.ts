@@ -375,7 +375,7 @@ describe("hostStore", () => {
     });
     const host = await useHostStore.getState().getDecryptedHost("h1");
     expect(host?.keepaliveSecs).toBeNull();
-    expect(host?.forwardAgent).toBe(false);
+    expect(host?.forwardAgent).toBeNull();
     expect(host?.env).toEqual([]);
     expect(host?.startup).toBeNull();
   });
@@ -435,6 +435,21 @@ describe("hostStore", () => {
     );
     expect(plain.forwardAgent).toBe(false);
     expect(mockUpsert.mock.calls[0][1]).not.toHaveProperty("forwardAgent");
+  });
+
+  it("updateHost with groupId null writes group_id null", async () => {
+    mockGet.mockResolvedValue({
+      id: "h1",
+      vault_id: "v1",
+      name: "prod",
+      group_id: "g1",
+      sort_order: 0,
+      data: "enc",
+    } as never);
+    mockDecrypt.mockResolvedValue({});
+    mockUpsert.mockResolvedValue({ data: "enc2" } as never);
+    await useHostStore.getState().updateHost("h1", { groupId: null });
+    expect(mockUpsert.mock.calls[0][1]).toMatchObject({ group_id: null });
   });
 
   it("updateHost reports whether the save succeeded", async () => {
@@ -576,6 +591,107 @@ describe("hostStore", () => {
       { plaintext: "{}", recordType: "groups" },
     );
     expect(useHostStore.getState().groups.length).toBe(1);
+  });
+
+  const groupRow = {
+    id: "g1",
+    vault_id: "v1",
+    name: "old",
+    sort_order: 0,
+    data: "enc",
+  } as never;
+  const plainOf = () =>
+    JSON.parse(
+      (mockUpsert.mock.calls[0][2] as { plaintext: string }).plaintext,
+    );
+
+  it("updateGroup keeps encrypted fields it did not patch", async () => {
+    mockGet.mockResolvedValue(groupRow);
+    mockDecrypt.mockResolvedValue({ username: "u", password: "p" });
+    await useHostStore.getState().updateGroup("g1", { name: "new" });
+    expect(plainOf()).toEqual({ username: "u", password: "p" });
+  });
+
+  it("updateGroup writes patched encrypted fields over existing", async () => {
+    mockGet.mockResolvedValue(groupRow);
+    mockDecrypt.mockResolvedValue({ username: "u", password: "p" });
+    await useHostStore.getState().updateGroup("g1", { username: "z" });
+    expect(plainOf()).toEqual({ username: "z", password: "p" });
+  });
+
+  it("updateGroup writes nothing when the stored data can't be decrypted", async () => {
+    mockGet.mockResolvedValue(groupRow);
+    mockDecrypt.mockRejectedValue(new Error("bad key"));
+    await useHostStore.getState().updateGroup("g1", { name: "new" });
+    expect(mockUpsert).not.toHaveBeenCalled();
+    expect(useHostStore.getState().error).toContain("bad key");
+  });
+
+  it("createGroup stores credentials only in encrypted data", async () => {
+    mockUpsert.mockResolvedValue({
+      id: "new",
+      vault_id: "v1",
+      created_at: "1970-01-01T00:00:00.001Z",
+      sort_order: 0,
+    } as never);
+    useVaultStore.setState({ currentVaultId: "v1" });
+    await useHostStore
+      .getState()
+      .createGroup({ name: "prod", username: "u", password: "p" });
+    expect(plainOf()).toEqual({ username: "u", password: "p" });
+    const cols = mockUpsert.mock.calls[0][1] as Record<string, unknown>;
+    expect(cols.username).toBeUndefined();
+    expect(cols.password).toBeUndefined();
+  });
+
+  it("getDecryptedGroup sanitizes junk", async () => {
+    mockGet.mockResolvedValue(groupRow);
+    mockDecrypt.mockResolvedValue({
+      authType: "inherit",
+      env: "x",
+      startup: "tmux",
+      forwardAgent: "yes",
+    });
+    const g = await useHostStore.getState().getDecryptedGroup("g1");
+    expect(g?.authType).toBeNull();
+    expect(g?.env).toEqual([]);
+    expect(g?.startup).toBeNull();
+    expect(g?.forwardAgent).toBeNull();
+  });
+
+  it("getDecryptedGroup keeps valid values", async () => {
+    mockGet.mockResolvedValue(groupRow);
+    mockDecrypt.mockResolvedValue({
+      username: "u",
+      authType: "both",
+      keyId: "k",
+      keepaliveSecs: 0,
+      startup: { none: true },
+      forwardAgent: false,
+    });
+    const g = await useHostStore.getState().getDecryptedGroup("g1");
+    expect(g).toMatchObject({
+      username: "u",
+      authType: "both",
+      keyId: "k",
+      keepaliveSecs: 0,
+      startup: { none: true },
+      forwardAgent: false,
+    });
+  });
+
+  it("host startup none marker and null forwardAgent survive decrypt", async () => {
+    mockGet.mockResolvedValue({
+      id: "h1",
+      vault_id: "v1",
+      name: "p",
+      sort_order: 0,
+      data: "enc",
+    } as never);
+    mockDecrypt.mockResolvedValue({ address: "a", startup: { none: true } });
+    const host = await useHostStore.getState().getDecryptedHost("h1");
+    expect(host?.startup).toEqual({ none: true });
+    expect(host?.forwardAgent).toBeNull();
   });
 
   it("deleteGroup tombstones", async () => {
