@@ -437,6 +437,21 @@ describe("hostStore", () => {
     expect(mockUpsert.mock.calls[0][1]).not.toHaveProperty("forwardAgent");
   });
 
+  it("updateHost with groupId null writes group_id null", async () => {
+    mockGet.mockResolvedValue({
+      id: "h1",
+      vault_id: "v1",
+      name: "prod",
+      group_id: "g1",
+      sort_order: 0,
+      data: "enc",
+    } as never);
+    mockDecrypt.mockResolvedValue({});
+    mockUpsert.mockResolvedValue({ data: "enc2" } as never);
+    await useHostStore.getState().updateHost("h1", { groupId: null });
+    expect(mockUpsert.mock.calls[0][1]).toMatchObject({ group_id: null });
+  });
+
   it("updateHost reports whether the save succeeded", async () => {
     mockGet.mockResolvedValue({
       id: "h1",
@@ -602,6 +617,14 @@ describe("hostStore", () => {
     mockDecrypt.mockResolvedValue({ username: "u", password: "p" });
     await useHostStore.getState().updateGroup("g1", { username: "z" });
     expect(plainOf()).toEqual({ username: "z", password: "p" });
+  });
+
+  it("updateGroup writes nothing when the stored data can't be decrypted", async () => {
+    mockGet.mockResolvedValue(groupRow);
+    mockDecrypt.mockRejectedValue(new Error("bad key"));
+    await useHostStore.getState().updateGroup("g1", { name: "new" });
+    expect(mockUpsert).not.toHaveBeenCalled();
+    expect(useHostStore.getState().error).toContain("bad key");
   });
 
   it("createGroup stores credentials only in encrypted data", async () => {
