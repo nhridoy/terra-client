@@ -406,4 +406,120 @@ mod tests {
             assert_eq!(crate::ssh::load_host_config(&db, &crypto, &id).unwrap().forward_agent, want);
         }
     }
+
+    #[allow(clippy::too_many_arguments)]
+    fn host_in(db: &db::LocalDb, crypto: &CryptoState, id: &str, vault: &str, auth: &str, key_id: Option<&str>, group: Option<&str>, payload: serde_json::Value) {
+        let data = crypto::encrypt_secret(&payload.to_string(), "hosts", &crypto.session.lock().unwrap()).unwrap();
+        db.conn.lock().unwrap().execute(
+            "INSERT INTO hosts (id, vault_id, name, data, auth_type, key_id, group_id, created_at, updated_at) VALUES (?1, ?2, ?1, ?3, ?4, ?5, ?6, '2026-10-02T00:00:00Z', '2026-10-02T00:00:00Z')",
+            rusqlite::params![id, vault, data, auth, key_id, group],
+        ).unwrap();
+    }
+
+    fn group_with(db: &db::LocalDb, crypto: &CryptoState, id: &str, vault: &str, parent: Option<&str>, payload: serde_json::Value, deleted: bool) {
+        let data = crypto::encrypt_secret(&payload.to_string(), "groups", &crypto.session.lock().unwrap()).unwrap();
+        db.conn.lock().unwrap().execute(
+            "INSERT INTO groups (id, vault_id, name, parent_id, data, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?1, ?3, ?4, '2026-10-02T00:00:00Z', '2026-10-02T00:00:00Z', ?5)",
+            rusqlite::params![id, vault, parent, data, deleted.then_some("2026-10-03T00:00:00Z")],
+        ).unwrap();
+    }
+
+    const PEM: &str = "-----BEGIN OPENSSH PRIVATE KEY-----\nsecret-key-body\n-----END OPENSSH PRIVATE KEY-----";
+
+    fn key_row(db: &db::LocalDb, crypto: &CryptoState, id: &str, vault: &str) {
+        let data = crypto::encrypt_secret(&serde_json::json!({"privateKey": PEM}).to_string(), "keys", &crypto.session.lock().unwrap()).unwrap();
+        db.conn.lock().unwrap().execute(
+            "INSERT INTO keys (id, vault_id, name, data, created_at, updated_at) VALUES (?1, ?2, ?1, ?3, '2026-10-02T00:00:00Z', '2026-10-02T00:00:00Z')",
+            rusqlite::params![id, vault, data],
+        ).unwrap();
+    }
+
+    #[test]
+    fn chain_stops_on_loop_and_depth() {
+        let (db, crypto, vault) = fixture();
+        group_with(&db, &crypto, "A", &vault, Some("B"), serde_json::json!({"username": "a"}), false);
+        group_with(&db, &crypto, "B", &vault, Some("A"), serde_json::json!({}), false);
+        assert_eq!(crate::host_inherit::group_chain(&db, &crypto, &vault, Some("A")).len(), 2);
+        for i in 0..20 {
+            let parent = (i < 19).then(|| format!("g{}", i + 1));
+            group_with(&db, &crypto, &format!("g{i}"), &vault, parent.as_deref(), serde_json::json!({}), false);
+        }
+        assert_eq!(crate::host_inherit::group_chain(&db, &crypto, &vault, Some("g0")).len(), 16);
+        host_in(&db, &crypto, "h", &vault, "inherit", None, Some("A"), serde_json::json!({"address": "a"}));
+        host_in(&db, &crypto, "h2", &vault, "inherit", None, Some("g0"), serde_json::json!({"address": "a"}));
+        assert_eq!(resolve_saved_route(&db, &crypto, "h").unwrap().target.username, "a");
+        assert!(resolve_saved_route(&db, &crypto, "h2").is_ok());
+    }
+
+    #[test]
+    fn chain_stops_at_deleted_or_other_vault_group() {
+        let (db, crypto, vault) = fixture();
+        group_with(&db, &crypto, "root", &vault, None, serde_json::json!({"keepaliveSecs": 60}), false);
+        group_with(&db, &crypto, "gone", &vault, Some("root"), serde_json::json!({"username": "x"}), true);
+        group_with(&db, &crypto, "child", &vault, Some("gone"), serde_json::json!({"username": "c"}), false);
+        group_with(&db, &crypto, "foreign", "other-vault", None, serde_json::json!({"username": "f"}), false);
+        group_with(&db, &crypto, "mixed", &vault, Some("foreign"), serde_json::json!({}), false);
+        let names = |g| crate::host_inherit::group_chain(&db, &crypto, &vault, Some(g)).into_iter().map(|l| l.id).collect::<Vec<_>>();
+        assert_eq!(names("child"), vec!["child"]);
+        assert_eq!(names("mixed"), vec!["mixed"]);
+        assert!(names("foreign").is_empty());
+        host_in(&db, &crypto, "h", &vault, "inherit", None, Some("child"), serde_json::json!({"address": "a"}));
+        let c = crate::ssh::load_host_config(&db, &crypto, "h").unwrap();
+        assert_eq!((c.username.as_str(), c.keepalive_secs), ("c", None));
+    }
+
+    #[test]
+    fn group_key_from_other_vault_is_ignored() {
+        let (db, crypto, vault) = fixture();
+        key_row(&db, &crypto, "k-other", "other-vault");
+        key_row(&db, &crypto, "k-mine", &vault);
+        group_with(&db, &crypto, "g", &vault, None, serde_json::json!({"authType": "key", "keyId": "k-other"}), false);
+        group_with(&db, &crypto, "ok", &vault, None, serde_json::json!({"authType": "key", "keyId": "k-mine"}), false);
+        host_in(&db, &crypto, "h", &vault, "inherit", None, Some("g"), serde_json::json!({"address": "a"}));
+        host_in(&db, &crypto, "h2", &vault, "inherit", None, Some("ok"), serde_json::json!({"address": "a"}));
+        assert_eq!(crate::ssh::load_host_config(&db, &crypto, "h").unwrap().private_key, None);
+        assert_eq!(crate::ssh::load_host_config(&db, &crypto, "h2").unwrap().private_key.as_deref(), Some(PEM));
+        // The host's own missing key still errors.
+        host_in(&db, &crypto, "own", &vault, "key", Some("nope"), Some("ok"), serde_json::json!({"address": "a"}));
+        assert_eq!(crate::ssh::load_host_config(&db, &crypto, "own").err().as_deref(), Some("key not found"));
+    }
+
+    #[test]
+    fn inherited_password_reaches_config() {
+        let (db, crypto, vault) = fixture();
+        snippet(&db, &crypto, "s1", &vault, "htop", false);
+        group_with(&db, &crypto, "root", &vault, None, serde_json::json!({"authType": "password", "password": "grp-pass",
+            "forwardAgent": true, "startup": {"snippetId": "s1"}, "env": [{"name": "A", "value": "1"}]}), false);
+        group_with(&db, &crypto, "team", &vault, Some("root"), serde_json::json!({"username": "deploy", "keepaliveSecs": 45}), false);
+        host_in(&db, &crypto, "h", &vault, "inherit", None, Some("team"), serde_json::json!({"address": "a", "password": "own"}));
+        let c = crate::ssh::load_host_config(&db, &crypto, "h").unwrap();
+        assert_eq!((c.username.as_str(), c.password.as_deref(), c.keepalive_secs), ("deploy", Some("grp-pass"), Some(45)));
+        assert!(c.forward_agent);
+        assert_eq!(c.env, vec![("A".to_string(), "1".to_string())]);
+        assert_eq!(c.startup, Some(StartupAction::Command("htop".into())));
+        host_in(&db, &crypto, "off", &vault, "password", None, Some("team"), serde_json::json!({"address": "a", "forwardAgent": false, "startup": {"none": true}}));
+        let c = crate::ssh::load_host_config(&db, &crypto, "off").unwrap();
+        assert_eq!((c.password, c.forward_agent, c.startup), (None, false, None));
+    }
+
+    #[test]
+    fn defaults_never_include_secrets() {
+        let (db, crypto, vault) = fixture();
+        key_row(&db, &crypto, "deploy-key", &vault);
+        group_with(&db, &crypto, "root", &vault, None, serde_json::json!({"authType": "both", "password": "grp-pass", "keyId": "deploy-key",
+            "startup": {"command": "uptime"}, "env": [{"name": "A", "value": "1"}]}), false);
+        group_with(&db, &crypto, "team", &vault, Some("root"), serde_json::json!({"username": "deploy"}), false);
+        let out = crate::host_inherit::defaults(&db, &crypto, Some("team"), &vault);
+        let text = out.to_string();
+        assert!(!text.contains("grp-pass") && !text.contains("secret-key-body"), "{text}");
+        assert_eq!(out["hasPassword"], true);
+        assert_eq!(out["keyName"], "deploy-key");
+        assert_eq!((out["username"].as_str(), out["usernameFrom"].as_str()), (Some("deploy"), Some("team")));
+        assert_eq!((out["authType"].as_str(), out["authFrom"].as_str()), (Some("both"), Some("root")));
+        assert_eq!((out["startupKind"].as_str(), out["startupFrom"].as_str()), (Some("command"), Some("root")));
+        assert_eq!(out["env"], serde_json::json!([{"name": "A", "value": "1", "from": "root"}]));
+        assert!(out.get("forwardAgent").is_none() && out.get("keepaliveSecs").is_none());
+        let empty = crate::host_inherit::defaults(&db, &crypto, None, &vault);
+        assert_eq!(empty, serde_json::json!({"hasPassword": false, "startupKind": null, "env": []}));
+    }
 }

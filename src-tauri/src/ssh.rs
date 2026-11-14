@@ -1564,50 +1564,42 @@ pub fn load_host_config(
     drop(session);
     let payload: serde_json::Value =
         serde_json::from_str(&plaintext).map_err(|e| format!("bad host payload: {e}"))?;
+    let chain = crate::host_inherit::group_chain(db, crypto, &row.vault_id, row.group_id.as_deref());
+    let effective = crate::host_inherit::resolve(
+        &payload,
+        row.auth_type.as_deref().unwrap_or("password"),
+        row.key_id.as_deref(),
+        &chain,
+    );
     let mut config = SshConfig {
         host: payload["address"].as_str().unwrap_or_default().to_string(),
         port: payload["port"].as_u64().unwrap_or(22) as u16,
-        username: payload["username"].as_str().unwrap_or("root").to_string(),
-        password: None,
+        username: effective.username.map_or_else(|| "root".to_string(), |(name, _)| name),
+        password: effective.password,
         private_key: None,
         passphrase: None,
         detect_os: false,
-        keepalive_secs: payload["keepaliveSecs"]
-            .as_f64()
-            .map(|n| crate::ssh_options::clamp_keepalive(n as i64)),
-        forward_agent: payload["forwardAgent"].as_bool() == Some(true),
-        env: payload["env"]
-            .as_array()
-            .map(|rows| {
-                rows.iter()
-                    .filter_map(|r| {
-                        let name = r["name"].as_str()?;
-                        let mut ch = name.chars();
-                        let ok = ch.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-                            && ch.all(|c| c.is_ascii_alphanumeric() || c == '_');
-                        ok.then(|| Some((name.to_string(), r["value"].as_str()?.to_string())))
-                            .flatten()
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
-        startup: load_startup(db, crypto, &row.vault_id, &payload["startup"]),
+        keepalive_secs: effective.keepalive_secs.map(|(secs, _)| secs),
+        forward_agent: effective.forward_agent.0,
+        env: effective.env.into_iter().map(|(name, value, _)| (name, value)).collect(),
+        // `{none: true}` has neither command nor snippetId, so load_startup gives None.
+        startup: load_startup(db, crypto, &row.vault_id, &effective.startup.0),
     };
-    let auth_type = row.auth_type.as_deref().unwrap_or("password");
-    // Load password when auth_type is "password" or "both"
-    if auth_type == "password" || auth_type == "both" {
-        config.password = payload["password"].as_str().map(String::from);
-    }
-    // Load key when auth_type is "key" or "both"
-    if auth_type == "key" || auth_type == "both" {
-        if let Some(key_id) = row.key_id.as_deref() {
-            let key_row = crate::db::get_sync_row(db, crate::db::Table::Keys, key_id)?
-                .ok_or_else(|| "key not found".to_string())?;
+    if let Some(key_id) = effective.key_id.as_deref() {
+        let decrypt = |key_row: &crate::db::SyncRow| -> Result<serde_json::Value, String> {
             let session = crypto.session.lock().map_err(|e| e.to_string())?;
             let key_plain = crate::team_keys::decrypt_row_secret(db, &session, &key_row.data, "keys", &key_row.vault_id)?;
-            drop(session);
-            let key_payload: serde_json::Value = serde_json::from_str(&key_plain)
-                .map_err(|e| format!("bad key payload: {e}"))?;
+            serde_json::from_str(&key_plain).map_err(|e| format!("bad key payload: {e}"))
+        };
+        let key_payload = if effective.auth_from.is_some() {
+            // An unusable inherited key means "no key": the connect never fails because of the chain.
+            crate::host_inherit::usable_key(db, key_id, &row.vault_id).and_then(|k| decrypt(&k).ok())
+        } else {
+            let key_row = crate::db::get_sync_row(db, crate::db::Table::Keys, key_id)?
+                .ok_or_else(|| "key not found".to_string())?;
+            Some(decrypt(&key_row)?)
+        };
+        if let Some(key_payload) = key_payload {
             config.private_key = key_payload["privateKey"].as_str().map(String::from);
             config.passphrase = key_payload["passphrase"].as_str().map(String::from);
         }
